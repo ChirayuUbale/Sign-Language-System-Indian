@@ -1,516 +1,545 @@
 
-import random
-import csv
-import shutil
 from pathlib import Path
-from collections import defaultdict
+import random
+import shutil
+import math
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+from PIL import Image
+from sklearn.model_selection import train_test_split
+
 
 # ============================================================
-# 1. PROJECT CONFIGURATION
+# 1. SETTINGS
 # ============================================================
 
-PROJECT_DIR = Path(
-    r"C:\Users\chirayu ubale\OneDrive\Desktop\Computer Vision\Indian-Sign-Language-System-repo"
-)
+ROOT = Path(__file__).resolve().parent.parent
 
-# Original dataset: data/Signer_1/A, data/Signer_2/B, etc.
-ORIGINAL_DATASET = PROJECT_DIR / "data"
+DATA_FOLDER = ROOT / "Preprocessed_Data_Final"
+OUTPUT_FOLDER = ROOT / "Label_Noise_Experiments"
 
-# New experimental datasets will be created here.
-OUTPUT_DIR = PROJECT_DIR / "Label_Noise_Experiments"
-
-# Dataset split ratios.
-TRAIN_RATIO = 0.70
-VALIDATION_RATIO = 0.15
-TEST_RATIO = 0.15
-
-# Label noise experiments.
-NOISE_LEVELS = [0, 10, 20, 30]
-
-# Reproducibility.
+NOISE_LEVELS = [0, 10, 20]
+TEST_SIZE = 0.30
 RANDOM_SEED = 42
 
 IMAGE_EXTENSIONS = {
-    ".jpg", ".jpeg", ".png", ".bmp",
-    ".webp", ".tif", ".tiff"
+    ".png", ".jpg", ".jpeg", ".bmp"
 }
 
+random.seed(RANDOM_SEED)
+np.random.seed(RANDOM_SEED)
+
+OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
+
 
 # ============================================================
-# 2. LOAD ALL SIGNERS AND THEIR LABELS
+# 2. READ ORIGINAL PREPROCESSED IMAGES
 # ============================================================
 
-def load_dataset():
+records = []
 
-    if not ORIGINAL_DATASET.exists():
-        raise FileNotFoundError(
-            f"Original dataset not found: {ORIGINAL_DATASET}"
-        )
-
-    dataset = []
-    signers = []
-    all_labels = set()
-
-    signer_folders = sorted(
-        folder for folder in ORIGINAL_DATASET.iterdir()
-        if folder.is_dir()
+if not DATA_FOLDER.is_dir():
+    raise FileNotFoundError(
+        f"Dataset not found: {DATA_FOLDER}"
     )
 
-    if not signer_folders:
-        raise ValueError("No signer folders found inside data/")
+for signer_folder in sorted(DATA_FOLDER.iterdir()):
 
-    print("\n========== DATASET SCAN ==========")
+    if not signer_folder.is_dir():
+        continue
 
-    for signer_folder in signer_folders:
+    signer = signer_folder.name
 
-        signer_name = signer_folder.name
-        signers.append(signer_name)
+    for label_folder in sorted(signer_folder.iterdir()):
 
-        print(f"\nSigner: {signer_name}")
+        if not label_folder.is_dir():
+            continue
 
-        label_folders = sorted(
-            folder for folder in signer_folder.iterdir()
-            if folder.is_dir()
-        )
+        label = label_folder.name
 
-        if not label_folders:
-            raise ValueError(
-                f"No label folders found for {signer_name}"
-            )
+        for image_path in sorted(label_folder.iterdir()):
 
-        signer_count = 0
+            if (
+                image_path.is_file()
+                and image_path.suffix.lower()
+                in IMAGE_EXTENSIONS
+            ):
 
-        for label_folder in label_folders:
-
-            label = label_folder.name
-            all_labels.add(label)
-
-            images = sorted(
-                file for file in label_folder.iterdir()
-                if file.is_file()
-                and file.suffix.lower() in IMAGE_EXTENSIONS
-            )
-
-            print(f"  Label {label}: {len(images)} images")
-
-            for image_path in images:
-
-                dataset.append({
-                    "signer": signer_name,
-                    "true_label": label,
-                    "image_path": image_path
+                records.append({
+                    "image_path": str(image_path.resolve()),
+                    "signer": signer,
+                    "original_label": label
                 })
 
-            signer_count += len(images)
+df = pd.DataFrame(records)
 
-        print(f"Total images for {signer_name}: {signer_count}")
+if df.empty:
+    raise ValueError("No images found.")
 
-    if not dataset:
-        raise ValueError("No images found in the dataset.")
+print("\n========== DATASET LOADED ==========")
+print("Total images:", len(df))
 
-    if len(all_labels) < 2:
-        raise ValueError("At least two labels are required.")
+print("\nImages per signer:")
+print(df.groupby("signer").size())
 
-    print("\nTotal signers:", len(signers))
-    print("Total classes:", len(all_labels))
-    print("Total images:", len(dataset))
+print("\nImages per label:")
+print(df.groupby("original_label").size())
 
-    return dataset, signers, sorted(all_labels)
+signers = sorted(df["signer"].unique())
+labels = sorted(df["original_label"].unique())
 
-
-# ============================================================
-# 3. SPLIT DATASET BY SIGNER AND LABEL
-# ============================================================
-
-def split_dataset(dataset):
-
-    rng = random.Random(RANDOM_SEED)
-
-    grouped_data = defaultdict(list)
-
-    # Group images by signer and original class.
-    for item in dataset:
-
-        key = (
-            item["signer"],
-            item["true_label"]
-        )
-
-        grouped_data[key].append(item)
-
-    train_data = []
-    validation_data = []
-    test_data = []
-
-    for key in sorted(grouped_data):
-
-        images = grouped_data[key].copy()
-
-        rng.shuffle(images)
-
-        total = len(images)
-
-        train_count = int(total * TRAIN_RATIO)
-        validation_count = int(total * VALIDATION_RATIO)
-
-        train_data.extend(images[:train_count])
-
-        validation_data.extend(
-            images[
-                train_count:
-                train_count + validation_count
-            ]
-        )
-
-        test_data.extend(
-            images[train_count + validation_count:]
-        )
-
-    rng.shuffle(train_data)
-    rng.shuffle(validation_data)
-    rng.shuffle(test_data)
-
-    return train_data, validation_data, test_data
-
-
-# ============================================================
-# 4. GENERATE NESTED SYMMETRIC LABEL NOISE
-# ============================================================
-
-def generate_noise_assignments(train_data, all_labels):
-
-    rng = random.Random(RANDOM_SEED)
-
-    # Group training images by signer and original label.
-    grouped_data = defaultdict(list)
-
-    for index, item in enumerate(train_data):
-
-        key = (
-            item["signer"],
-            item["true_label"]
-        )
-
-        grouped_data[key].append(index)
-
-    assignments = {
-        percentage: {}
-        for percentage in NOISE_LEVELS
-    }
-
-    for key in sorted(grouped_data):
-
-        indices = grouped_data[key]
-
-        original_label = key[1]
-
-        # Randomize image selection within each signer/class.
-        shuffled_indices = indices.copy()
-        rng.shuffle(shuffled_indices)
-
-        # Select an incorrect replacement label for each image.
-        possible_labels = [
-            label for label in all_labels
-            if label != original_label
-        ]
-
-        replacement_labels = {
-            index: rng.choice(possible_labels)
-            for index in shuffled_indices
-        }
-
-        # Create nested noise configurations.
-        for percentage in NOISE_LEVELS:
-
-            number_to_corrupt = round(
-                len(indices) * percentage / 100
-            )
-
-            selected_indices = set(
-                shuffled_indices[:number_to_corrupt]
-            )
-
-            for index in indices:
-
-                if index in selected_indices:
-
-                    assigned_label = replacement_labels[index]
-                    is_noisy = True
-
-                else:
-
-                    assigned_label = original_label
-                    is_noisy = False
-
-                assignments[percentage][index] = {
-                    "assigned_label": assigned_label,
-                    "is_noisy": is_noisy
-                }
-
-    return assignments
-
-
-# ============================================================
-# 5. COPY IMAGES INTO THEIR ASSIGNED CLASS FOLDERS
-# ============================================================
-
-def copy_split(
-    experiment_folder,
-    split_name,
-    data,
-    noise_assignments=None
-):
-
-    records = []
-
-    for index, item in enumerate(data):
-
-        signer = item["signer"]
-        original_label = item["true_label"]
-        original_path = item["image_path"]
-
-        if split_name == "train":
-
-            noise_info = noise_assignments[index]
-
-            assigned_label = noise_info["assigned_label"]
-            is_noisy = noise_info["is_noisy"]
-
-        else:
-
-            # Validation and test labels always remain correct.
-            assigned_label = original_label
-            is_noisy = False
-
-        # Preserve signer structure and use assigned class folder.
-        destination_folder = (
-            experiment_folder /
-            split_name /
-            signer /
-            assigned_label
-        )
-
-        destination_folder.mkdir(
-            parents=True,
-            exist_ok=True
-        )
-
-        # Include original class in filename to prevent collisions.
-        new_filename = (
-            f"{original_label}__{original_path.name}"
-        )
-
-        destination_path = destination_folder / new_filename
-
-        shutil.copy2(
-            original_path,
-            destination_path
-        )
-
-        records.append({
-
-            "signer": signer,
-
-            "image_filename": original_path.name,
-
-            "original_path": str(original_path),
-
-            "copied_path": str(destination_path),
-
-            "original_label": original_label,
-
-            "assigned_label": assigned_label,
-
-            "is_label_noisy": is_noisy,
-
-            "split": split_name
-
-        })
-
-    return records
-
-
-# ============================================================
-# 6. SAVE CSV METADATA
-# ============================================================
-
-def save_metadata(records, output_path, noise_percentage):
-
-    fieldnames = [
-        "signer",
-        "image_filename",
-        "original_path",
-        "copied_path",
-        "original_label",
-        "assigned_label",
-        "is_label_noisy",
-        "split",
-        "noise_percentage",
-        "random_seed"
-    ]
-
-    with open(
-        output_path,
-        "w",
-        newline="",
-        encoding="utf-8"
-    ) as csvfile:
-
-        writer = csv.DictWriter(
-            csvfile,
-            fieldnames=fieldnames
-        )
-
-        writer.writeheader()
-
-        for record in records:
-
-            record["noise_percentage"] = noise_percentage
-            record["random_seed"] = RANDOM_SEED
-
-            writer.writerow(record)
-
-
-# ============================================================
-# 7. PRINT EXPERIMENT SUMMARY
-# ============================================================
-
-def print_summary(
-    percentage,
-    train_records,
-    validation_records,
-    test_records
-):
-
-    noisy_count = sum(
-        record["is_label_noisy"]
-        for record in train_records
+if len(signers) != 3:
+    raise ValueError(
+        f"Expected 3 signers, found {len(signers)}"
     )
 
-    clean_count = len(train_records) - noisy_count
-
-    print("\n------------------------------------")
-    print(f"LABEL NOISE: {percentage}%")
-    print("------------------------------------")
-
-    print("Training images:", len(train_records))
-    print("Correct training labels:", clean_count)
-    print("Incorrect training labels:", noisy_count)
-
-    print("Validation images:", len(validation_records))
-    print("Testing images:", len(test_records))
+if len(labels) != 36:
+    raise ValueError(
+        f"Expected 36 classes, found {len(labels)}"
+    )
 
 
 # ============================================================
-# 8. MAIN EXECUTION
+# 3. TRAINING / TESTING SPLIT
 # ============================================================
 
-def main():
+# Stratification preserves signer-class representation.
+df["stratify_key"] = (
+    df["signer"] + "_" + df["original_label"]
+)
 
-    # Protect existing experimental results.
-    if OUTPUT_DIR.exists() and any(OUTPUT_DIR.iterdir()):
+train_df, test_df = train_test_split(
+    df,
+    test_size=TEST_SIZE,
+    random_state=RANDOM_SEED,
+    stratify=df["stratify_key"]
+)
 
-        raise FileExistsError(
-            f"Output directory is not empty: {OUTPUT_DIR}\n"
-            "Please choose another output folder or "
-            "move the existing experiments before running."
-        )
+train_df = train_df.drop(
+    columns=["stratify_key"]
+).reset_index(drop=True)
 
-    OUTPUT_DIR.mkdir(
+test_df = test_df.drop(
+    columns=["stratify_key"]
+).reset_index(drop=True)
+
+print("\n========== TRAIN / TEST SPLIT ==========")
+print("Training:", len(train_df))
+print("Testing:", len(test_df))
+
+
+# ============================================================
+# 4. COPY CLEAN TESTING IMAGES
+# ============================================================
+
+TEST_FOLDER = OUTPUT_FOLDER / "Test_Clean"
+
+# Rebuild generated test folder to avoid stale files
+if TEST_FOLDER.exists():
+    shutil.rmtree(TEST_FOLDER)
+
+test_records = []
+
+for _, row in test_df.iterrows():
+
+    source = Path(row["image_path"])
+
+    destination_dir = (
+        TEST_FOLDER / row["original_label"]
+    )
+
+    destination_dir.mkdir(
         parents=True,
         exist_ok=True
     )
 
-    # Load all signers and classes.
-    dataset, signers, all_labels = load_dataset()
-
-    # Split before introducing label noise.
-    print("\n========== DATASET SPLITTING ==========")
-
-    train_data, validation_data, test_data = split_dataset(
-        dataset
+    # Include signer to prevent duplicate filenames
+    destination_name = (
+        f"{row['signer']}__{source.name}"
     )
 
-    print("Training:", len(train_data))
-    print("Validation:", len(validation_data))
-    print("Testing:", len(test_data))
-
-    # Generate nested label-noise configurations.
-    print("\n========== GENERATING LABEL NOISE ==========")
-
-    assignments = generate_noise_assignments(
-        train_data,
-        all_labels
+    destination = (
+        destination_dir / destination_name
     )
 
-    # Create all four experimental datasets.
-    for percentage in NOISE_LEVELS:
+    shutil.copy2(source, destination)
 
-        print(f"\nCreating {percentage}% experiment...")
+    test_records.append({
+        "image_path": str(destination),
+        "signer": row["signer"],
+        "original_label": row["original_label"],
+        "assigned_label": row["original_label"],
+        "is_noisy": False
+    })
 
-        experiment_folder = (
-            OUTPUT_DIR /
-            f"Noise_{percentage}_Percent"
+pd.DataFrame(test_records).to_csv(
+    OUTPUT_FOLDER / "test_clean.csv",
+    index=False
+)
+
+print("Clean test images copied:", len(test_records))
+
+
+# ============================================================
+# 5. GENERATE REPRODUCIBLE LABEL NOISE
+# ============================================================
+
+rng = random.Random(RANDOM_SEED)
+
+shuffled_indices = list(range(len(train_df)))
+rng.shuffle(shuffled_indices)
+
+# Keep incorrect labels consistent between experiments
+wrong_label_mapping = {}
+
+for index in shuffled_indices:
+
+    correct_label = train_df.loc[
+        index, "original_label"
+    ]
+
+    possible_labels = [
+        label
+        for label in labels
+        if label != correct_label
+    ]
+
+    wrong_label_mapping[index] = rng.choice(
+        possible_labels
+    )
+
+
+# ============================================================
+# 6. GENERATE IMAGE DATASETS
+# ============================================================
+
+summary = []
+all_experiment_records = {}
+
+for noise_level in NOISE_LEVELS:
+
+    print(
+        f"\n========== GENERATING {noise_level}% NOISE =========="
+    )
+
+    experiment_folder = (
+        OUTPUT_FOLDER / f"Noise_{noise_level}" / "train"
+    )
+
+    # Remove previous generated images for this experiment
+    if experiment_folder.exists():
+        shutil.rmtree(experiment_folder)
+
+    number_to_change = round(
+        len(train_df) * noise_level / 100
+    )
+
+    selected_indices = set(
+        shuffled_indices[:number_to_change]
+    )
+
+    experiment_records = []
+
+    for index, row in train_df.iterrows():
+
+        source = Path(row["image_path"])
+
+        original_label = row["original_label"]
+
+        is_noisy = index in selected_indices
+
+        if is_noisy:
+            assigned_label = wrong_label_mapping[index]
+        else:
+            assigned_label = original_label
+
+        # Store image in its ASSIGNED label folder.
+        # A gesture A incorrectly labelled F goes into F/.
+        destination_dir = (
+            experiment_folder / assigned_label
         )
 
-        experiment_folder.mkdir(
+        destination_dir.mkdir(
             parents=True,
             exist_ok=True
         )
 
-        # Training: apply selected label noise.
-        train_records = copy_split(
-            experiment_folder,
-            "train",
-            train_data,
-            assignments[percentage]
+        destination_name = (
+            f"{row['signer']}__"
+            f"{original_label}__"
+            f"{source.name}"
         )
 
-        # Validation: clean labels.
-        validation_records = copy_split(
-            experiment_folder,
-            "validation",
-            validation_data
+        destination = (
+            destination_dir / destination_name
         )
 
-        # Testing: clean labels.
-        test_records = copy_split(
-            experiment_folder,
-            "test",
-            test_data
-        )
+        shutil.copy2(source, destination)
 
-        all_records = (
-            train_records +
-            validation_records +
-            test_records
-        )
+        experiment_records.append({
+            "image_path": str(destination),
+            "signer": row["signer"],
+            "original_label": original_label,
+            "assigned_label": assigned_label,
+            "is_noisy": is_noisy
+        })
 
-        # Save complete metadata.
-        save_metadata(
-            all_records,
-            experiment_folder / "metadata.csv",
-            percentage
-        )
+    experiment_df = pd.DataFrame(
+        experiment_records
+    )
 
-        print_summary(
-            percentage,
-            train_records,
-            validation_records,
-            test_records
-        )
+    experiment_df.to_csv(
+        OUTPUT_FOLDER /
+        f"train_noise_{noise_level}.csv",
+        index=False
+    )
 
-    print("\n========================================")
-    print("ALL FOUR EXPERIMENTS CREATED SUCCESSFULLY")
-    print("========================================")
+    all_experiment_records[noise_level] = (
+        experiment_df
+    )
 
-    print("\nOutput directory:")
-    print(OUTPUT_DIR)
+    incorrect_count = int(
+        experiment_df["is_noisy"].sum()
+    )
+
+    correct_count = (
+        len(experiment_df) - incorrect_count
+    )
+
+    summary.append({
+        "noise_level": noise_level,
+        "training_images": len(experiment_df),
+        "correct_labels": correct_count,
+        "incorrect_labels": incorrect_count,
+        "test_images": len(test_df)
+    })
+
+    print("Images generated:", len(experiment_df))
+    print("Correct labels:", correct_count)
+    print("Incorrect labels:", incorrect_count)
 
 
 # ============================================================
-# 9. RUN SCRIPT
+# 7. SAVE SUMMARY
 # ============================================================
 
-if __name__ == "__main__":
-    main()
+summary_df = pd.DataFrame(summary)
+
+summary_df.to_csv(
+    OUTPUT_FOLDER / "noise_summary.csv",
+    index=False
+)
+
+print("\n========== EXPERIMENT SUMMARY ==========")
+print(summary_df.to_string(index=False))
+
+
+# ============================================================
+# 8. GRAPH: TRAINING / TESTING DISTRIBUTION
+# ============================================================
+
+fig, ax = plt.subplots(figsize=(8, 5))
+
+bars = ax.bar(
+    ["Training", "Testing"],
+    [len(train_df), len(test_df)]
+)
+
+ax.bar_label(bars, padding=3)
+
+ax.set_title("Dataset Training and Testing Split")
+ax.set_ylabel("Number of Images")
+
+ax.set_ylim(0, len(train_df) * 1.15)
+
+plt.tight_layout()
+
+plt.savefig(
+    OUTPUT_FOLDER / "train_test_split.png",
+    dpi=300,
+    bbox_inches="tight"
+)
+
+plt.close(fig)
+
+
+# ============================================================
+# 9. GRAPH: CORRECT VS INCORRECT LABELS
+# ============================================================
+
+x = np.arange(len(NOISE_LEVELS))
+width = 0.35
+
+fig, ax = plt.subplots(figsize=(10, 6))
+
+bars1 = ax.bar(
+    x - width / 2,
+    summary_df["correct_labels"],
+    width,
+    label="Correct Labels"
+)
+
+bars2 = ax.bar(
+    x + width / 2,
+    summary_df["incorrect_labels"],
+    width,
+    label="Incorrect Labels"
+)
+
+ax.set_xticks(x)
+ax.set_xticklabels(
+    [f"{level}%" for level in NOISE_LEVELS]
+)
+
+ax.set_title(
+    "Correct vs Incorrect Training Labels"
+)
+
+ax.set_xlabel("Label Noise Level")
+ax.set_ylabel("Number of Images")
+
+ax.legend()
+
+ax.bar_label(bars1, padding=3)
+ax.bar_label(bars2, padding=3)
+
+ax.set_ylim(
+    0,
+    summary_df["training_images"].max() * 1.15
+)
+
+plt.tight_layout()
+
+plt.savefig(
+    OUTPUT_FOLDER / "label_noise_comparison.png",
+    dpi=300,
+    bbox_inches="tight"
+)
+
+plt.close(fig)
+
+
+# ============================================================
+# 10. VISUALIZE 12 INCORRECTLY LABELLED IMAGES
+# ============================================================
+
+demo_df = all_experiment_records[20]
+
+noisy_examples = demo_df[
+    demo_df["is_noisy"]
+]
+
+sample_count = min(
+    12,
+    len(noisy_examples)
+)
+
+if sample_count > 0:
+
+    samples = noisy_examples.sample(
+        n=sample_count,
+        random_state=RANDOM_SEED
+    )
+
+    fig, axes = plt.subplots(
+        3, 4,
+        figsize=(15, 11)
+    )
+
+    axes = axes.flatten()
+
+    for ax, (_, row) in zip(
+        axes,
+        samples.iterrows()
+    ):
+
+        with Image.open(row["image_path"]) as img:
+            image = img.convert("RGB").copy()
+
+        ax.imshow(image)
+
+        ax.set_title(
+            f"Signer: {row['signer']}\n"
+            f"Original: {row['original_label']}\n"
+            f"Assigned: {row['assigned_label']}",
+            fontsize=10
+        )
+
+        ax.axis("off")
+
+    for ax in axes[sample_count:]:
+        ax.axis("off")
+
+    plt.suptitle(
+        "Examples of Incorrect Labels (20% Noise)",
+        fontsize=16
+    )
+
+    plt.tight_layout()
+
+    plt.savefig(
+        OUTPUT_FOLDER / "noisy_image_examples.png",
+        dpi=300,
+        bbox_inches="tight"
+    )
+
+    plt.close(fig)
+
+
+# ============================================================
+# 11. FINAL VERIFICATION
+# ============================================================
+
+print("\n========== FINAL VERIFICATION ==========")
+
+original_train_paths = set(
+    train_df["image_path"]
+)
+
+original_test_paths = set(
+    test_df["image_path"]
+)
+
+assert not (
+    original_train_paths & original_test_paths
+), "Training and testing images overlap."
+
+for noise_level in NOISE_LEVELS:
+
+    experiment_df = (
+        all_experiment_records[noise_level]
+    )
+
+    expected = round(
+        len(train_df) * noise_level / 100
+    )
+
+    actual = int(
+        experiment_df["is_noisy"].sum()
+    )
+
+    assert actual == expected
+
+    assert (
+        experiment_df["original_label"]
+        != experiment_df["assigned_label"]
+    ).sum() == expected
+
+    assert all(
+        Path(path).is_file()
+        for path in experiment_df["image_path"]
+    )
+
+    print(
+        f"{noise_level}% verified: "
+        f"{len(experiment_df)} images, "
+        f"{actual} incorrect labels"
+    )
+
+print("\nClean testing images:", len(test_df))
+print("All datasets verified.")
+print("Output:", OUTPUT_FOLDER)
+print("\nLABEL NOISE EXPERIMENT COMPLETED")
