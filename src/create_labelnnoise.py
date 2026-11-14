@@ -6,18 +6,18 @@ from pathlib import Path
 from collections import defaultdict
 
 # ============================================================
-# 1. CONFIGURATION
+# 1. PROJECT CONFIGURATION
 # ============================================================
 
-# Change this to your actual original dataset path.
-ORIGINAL_DATASET = Path(
-    r"C:\Users\YourName\Desktop\Indian_Sign_Language\Original_Dataset"
+PROJECT_DIR = Path(
+    r"C:\Users\chirayu ubale\OneDrive\Desktop\Computer Vision\Indian-Sign-Language-System-repo"
 )
 
-# New output directory.
-OUTPUT_DIR = Path(
-    r"C:\Users\YourName\Desktop\Indian_Sign_Language\Label_Noise_Experiments"
-)
+# Original dataset: data/Signer_1/A, data/Signer_2/B, etc.
+ORIGINAL_DATASET = PROJECT_DIR / "data"
+
+# New experimental datasets will be created here.
+OUTPUT_DIR = PROJECT_DIR / "Label_Noise_Experiments"
 
 # Dataset split ratios.
 TRAIN_RATIO = 0.70
@@ -27,86 +27,124 @@ TEST_RATIO = 0.15
 # Label noise experiments.
 NOISE_LEVELS = [0, 10, 20, 30]
 
-# Fixed seed for reproducibility.
+# Reproducibility.
 RANDOM_SEED = 42
 
-# Supported image formats.
 IMAGE_EXTENSIONS = {
-    ".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"
+    ".jpg", ".jpeg", ".png", ".bmp",
+    ".webp", ".tif", ".tiff"
 }
 
 
 # ============================================================
-# 2. LOAD ORIGINAL DATASET
+# 2. LOAD ALL SIGNERS AND THEIR LABELS
 # ============================================================
 
-def load_dataset(dataset_path):
+def load_dataset():
 
-    if not dataset_path.exists():
+    if not ORIGINAL_DATASET.exists():
         raise FileNotFoundError(
-            f"Dataset not found: {dataset_path}"
-        )
-
-    classes = sorted(
-        folder.name
-        for folder in dataset_path.iterdir()
-        if folder.is_dir()
-    )
-
-    if len(classes) < 2:
-        raise ValueError(
-            "At least two class folders are required."
+            f"Original dataset not found: {ORIGINAL_DATASET}"
         )
 
     dataset = []
+    signers = []
+    all_labels = set()
 
-    for class_name in classes:
+    signer_folders = sorted(
+        folder for folder in ORIGINAL_DATASET.iterdir()
+        if folder.is_dir()
+    )
 
-        class_folder = dataset_path / class_name
+    if not signer_folders:
+        raise ValueError("No signer folders found inside data/")
 
-        images = sorted(
-            file for file in class_folder.iterdir()
-            if file.is_file()
-            and file.suffix.lower() in IMAGE_EXTENSIONS
+    print("\n========== DATASET SCAN ==========")
+
+    for signer_folder in signer_folders:
+
+        signer_name = signer_folder.name
+        signers.append(signer_name)
+
+        print(f"\nSigner: {signer_name}")
+
+        label_folders = sorted(
+            folder for folder in signer_folder.iterdir()
+            if folder.is_dir()
         )
 
-        for image_path in images:
+        if not label_folders:
+            raise ValueError(
+                f"No label folders found for {signer_name}"
+            )
 
-            dataset.append({
-                "image_path": image_path,
-                "true_label": class_name
-            })
+        signer_count = 0
 
-        print(
-            f"Class {class_name}: {len(images)} images"
-        )
+        for label_folder in label_folders:
+
+            label = label_folder.name
+            all_labels.add(label)
+
+            images = sorted(
+                file for file in label_folder.iterdir()
+                if file.is_file()
+                and file.suffix.lower() in IMAGE_EXTENSIONS
+            )
+
+            print(f"  Label {label}: {len(images)} images")
+
+            for image_path in images:
+
+                dataset.append({
+                    "signer": signer_name,
+                    "true_label": label,
+                    "image_path": image_path
+                })
+
+            signer_count += len(images)
+
+        print(f"Total images for {signer_name}: {signer_count}")
 
     if not dataset:
         raise ValueError("No images found in the dataset.")
 
-    return dataset, classes
+    if len(all_labels) < 2:
+        raise ValueError("At least two labels are required.")
+
+    print("\nTotal signers:", len(signers))
+    print("Total classes:", len(all_labels))
+    print("Total images:", len(dataset))
+
+    return dataset, signers, sorted(all_labels)
 
 
 # ============================================================
-# 3. SPLIT DATASET BEFORE INTRODUCING LABEL NOISE
+# 3. SPLIT DATASET BY SIGNER AND LABEL
 # ============================================================
 
-def split_dataset(dataset, classes):
+def split_dataset(dataset):
 
     rng = random.Random(RANDOM_SEED)
 
     grouped_data = defaultdict(list)
 
+    # Group images by signer and original class.
     for item in dataset:
-        grouped_data[item["true_label"]].append(item)
+
+        key = (
+            item["signer"],
+            item["true_label"]
+        )
+
+        grouped_data[key].append(item)
 
     train_data = []
     validation_data = []
     test_data = []
 
-    for class_name in classes:
+    for key in sorted(grouped_data):
 
-        images = grouped_data[class_name].copy()
+        images = grouped_data[key].copy()
 
         rng.shuffle(images)
 
@@ -136,87 +174,100 @@ def split_dataset(dataset, classes):
 
 
 # ============================================================
-# 4. GENERATE NESTED LABEL NOISE
+# 4. GENERATE NESTED SYMMETRIC LABEL NOISE
 # ============================================================
 
-def generate_noise_assignments(train_data, classes):
+def generate_noise_assignments(train_data, all_labels):
 
     rng = random.Random(RANDOM_SEED)
 
-    total_training_images = len(train_data)
+    # Group training images by signer and original label.
+    grouped_data = defaultdict(list)
 
-    # Random order determines which samples are corrupted first.
-    shuffled_indices = list(range(total_training_images))
-    rng.shuffle(shuffled_indices)
+    for index, item in enumerate(train_data):
 
-    # Preselect incorrect labels for up to 30% of training data.
-    corruption_labels = {}
+        key = (
+            item["signer"],
+            item["true_label"]
+        )
 
-    for index in shuffled_indices:
+        grouped_data[key].append(index)
 
-        original_label = train_data[index]["true_label"]
+    assignments = {
+        percentage: {}
+        for percentage in NOISE_LEVELS
+    }
 
+    for key in sorted(grouped_data):
+
+        indices = grouped_data[key]
+
+        original_label = key[1]
+
+        # Randomize image selection within each signer/class.
+        shuffled_indices = indices.copy()
+        rng.shuffle(shuffled_indices)
+
+        # Select an incorrect replacement label for each image.
         possible_labels = [
-            label for label in classes
+            label for label in all_labels
             if label != original_label
         ]
 
-        corruption_labels[index] = rng.choice(
-            possible_labels
-        )
+        replacement_labels = {
+            index: rng.choice(possible_labels)
+            for index in shuffled_indices
+        }
 
-    assignments = {}
+        # Create nested noise configurations.
+        for percentage in NOISE_LEVELS:
 
-    for noise_percentage in NOISE_LEVELS:
+            number_to_corrupt = round(
+                len(indices) * percentage / 100
+            )
 
-        number_to_corrupt = round(
-            total_training_images * noise_percentage / 100
-        )
+            selected_indices = set(
+                shuffled_indices[:number_to_corrupt]
+            )
 
-        selected_indices = set(
-            shuffled_indices[:number_to_corrupt]
-        )
+            for index in indices:
 
-        assignments[noise_percentage] = {}
+                if index in selected_indices:
 
-        for index, item in enumerate(train_data):
+                    assigned_label = replacement_labels[index]
+                    is_noisy = True
 
-            if index in selected_indices:
+                else:
 
-                assigned_label = corruption_labels[index]
-                is_noisy = True
+                    assigned_label = original_label
+                    is_noisy = False
 
-            else:
-
-                assigned_label = item["true_label"]
-                is_noisy = False
-
-            assignments[noise_percentage][index] = {
-                "assigned_label": assigned_label,
-                "is_noisy": is_noisy
-            }
+                assignments[percentage][index] = {
+                    "assigned_label": assigned_label,
+                    "is_noisy": is_noisy
+                }
 
     return assignments
 
 
 # ============================================================
-# 5. COPY IMAGES INTO THE EXPERIMENT FOLDERS
+# 5. COPY IMAGES INTO THEIR ASSIGNED CLASS FOLDERS
 # ============================================================
 
 def copy_split(
     experiment_folder,
     split_name,
     data,
-    classes,
     noise_assignments=None
 ):
 
-    csv_records = []
+    records = []
 
     for index, item in enumerate(data):
 
+        signer = item["signer"]
+        original_label = item["true_label"]
         original_path = item["image_path"]
-        true_label = item["true_label"]
 
         if split_name == "train":
 
@@ -227,13 +278,15 @@ def copy_split(
 
         else:
 
-            # Validation and test labels remain unchanged.
-            assigned_label = true_label
+            # Validation and test labels always remain correct.
+            assigned_label = original_label
             is_noisy = False
 
+        # Preserve signer structure and use assigned class folder.
         destination_folder = (
             experiment_folder /
             split_name /
+            signer /
             assigned_label
         )
 
@@ -242,54 +295,59 @@ def copy_split(
             exist_ok=True
         )
 
-        # Prefix original class to prevent filename collisions.
+        # Include original class in filename to prevent collisions.
         new_filename = (
-            f"{true_label}__{original_path.name}"
+            f"{original_label}__{original_path.name}"
         )
 
-        destination_path = (
-            destination_folder / new_filename
-        )
+        destination_path = destination_folder / new_filename
 
         shutil.copy2(
             original_path,
             destination_path
         )
 
-        csv_records.append({
+        records.append({
+
+            "signer": signer,
+
             "image_filename": original_path.name,
+
             "original_path": str(original_path),
+
             "copied_path": str(destination_path),
-            "true_label": true_label,
+
+            "original_label": original_label,
+
             "assigned_label": assigned_label,
+
             "is_label_noisy": is_noisy,
+
             "split": split_name
+
         })
 
-    return csv_records
+    return records
 
 
 # ============================================================
-# 6. CREATE CSV METADATA
+# 6. SAVE CSV METADATA
 # ============================================================
 
 def save_metadata(records, output_path, noise_percentage):
 
     fieldnames = [
+        "signer",
         "image_filename",
         "original_path",
         "copied_path",
-        "true_label",
+        "original_label",
         "assigned_label",
         "is_label_noisy",
         "split",
-        "noise_percentage"
+        "noise_percentage",
+        "random_seed"
     ]
-
-    output_path.parent.mkdir(
-        parents=True,
-        exist_ok=True
-    )
 
     with open(
         output_path,
@@ -308,20 +366,54 @@ def save_metadata(records, output_path, noise_percentage):
         for record in records:
 
             record["noise_percentage"] = noise_percentage
+            record["random_seed"] = RANDOM_SEED
 
             writer.writerow(record)
 
 
 # ============================================================
-# 7. CREATE ALL FOUR EXPERIMENTS
+# 7. PRINT EXPERIMENT SUMMARY
+# ============================================================
+
+def print_summary(
+    percentage,
+    train_records,
+    validation_records,
+    test_records
+):
+
+    noisy_count = sum(
+        record["is_label_noisy"]
+        for record in train_records
+    )
+
+    clean_count = len(train_records) - noisy_count
+
+    print("\n------------------------------------")
+    print(f"LABEL NOISE: {percentage}%")
+    print("------------------------------------")
+
+    print("Training images:", len(train_records))
+    print("Correct training labels:", clean_count)
+    print("Incorrect training labels:", noisy_count)
+
+    print("Validation images:", len(validation_records))
+    print("Testing images:", len(test_records))
+
+
+# ============================================================
+# 8. MAIN EXECUTION
 # ============================================================
 
 def main():
 
+    # Protect existing experimental results.
     if OUTPUT_DIR.exists() and any(OUTPUT_DIR.iterdir()):
+
         raise FileExistsError(
-            f"Output folder is not empty: {OUTPUT_DIR}\n"
-            "Choose a new output folder to avoid overwriting results."
+            f"Output directory is not empty: {OUTPUT_DIR}\n"
+            "Please choose another output folder or "
+            "move the existing experiments before running."
         )
 
     OUTPUT_DIR.mkdir(
@@ -329,43 +421,36 @@ def main():
         exist_ok=True
     )
 
-    print("\nLoading original dataset...")
+    # Load all signers and classes.
+    dataset, signers, all_labels = load_dataset()
 
-    dataset, classes = load_dataset(
-        ORIGINAL_DATASET
-    )
-
-    print("\nSplitting original dataset...")
+    # Split before introducing label noise.
+    print("\n========== DATASET SPLITTING ==========")
 
     train_data, validation_data, test_data = split_dataset(
-        dataset,
-        classes
+        dataset
     )
 
-    print("\nDataset split summary:")
     print("Training:", len(train_data))
     print("Validation:", len(validation_data))
     print("Testing:", len(test_data))
-    print("Total:", len(dataset))
 
-    # Generate nested noise configurations.
-    print("\nGenerating label-noise assignments...")
+    # Generate nested label-noise configurations.
+    print("\n========== GENERATING LABEL NOISE ==========")
 
-    noise_assignments = generate_noise_assignments(
+    assignments = generate_noise_assignments(
         train_data,
-        classes
+        all_labels
     )
 
-    # Create all four experiments.
-    for noise_percentage in NOISE_LEVELS:
+    # Create all four experimental datasets.
+    for percentage in NOISE_LEVELS:
 
-        print(
-            f"\nCreating {noise_percentage}% label-noise dataset..."
-        )
+        print(f"\nCreating {percentage}% experiment...")
 
         experiment_folder = (
             OUTPUT_DIR /
-            f"Noise_{noise_percentage}_Percent"
+            f"Noise_{percentage}_Percent"
         )
 
         experiment_folder.mkdir(
@@ -373,74 +458,58 @@ def main():
             exist_ok=True
         )
 
-        # Training images: noisy labels according to experiment.
+        # Training: apply selected label noise.
         train_records = copy_split(
             experiment_folder,
             "train",
             train_data,
-            classes,
-            noise_assignments[noise_percentage]
+            assignments[percentage]
         )
 
-        # Validation: always clean.
+        # Validation: clean labels.
         validation_records = copy_split(
             experiment_folder,
             "validation",
-            validation_data,
-            classes
+            validation_data
         )
 
-        # Testing: always clean.
+        # Testing: clean labels.
         test_records = copy_split(
             experiment_folder,
             "test",
-            test_data,
-            classes
+            test_data
         )
 
-        # Save metadata.
         all_records = (
             train_records +
             validation_records +
             test_records
         )
 
+        # Save complete metadata.
         save_metadata(
             all_records,
             experiment_folder / "metadata.csv",
-            noise_percentage
+            percentage
         )
 
-        corrupted_count = sum(
-            record["is_label_noisy"]
-            for record in train_records
+        print_summary(
+            percentage,
+            train_records,
+            validation_records,
+            test_records
         )
 
-        print(
-            f"Training images: {len(train_records)}"
-        )
+    print("\n========================================")
+    print("ALL FOUR EXPERIMENTS CREATED SUCCESSFULLY")
+    print("========================================")
 
-        print(
-            f"Corrupted training labels: {corrupted_count}"
-        )
-
-        print(
-            f"Clean validation images: {len(validation_records)}"
-        )
-
-        print(
-            f"Clean testing images: {len(test_records)}"
-        )
-
-    print("\n====================================")
-    print("ALL EXPERIMENTS CREATED SUCCESSFULLY")
-    print("====================================")
-
-    print(f"\nOutput location: {OUTPUT_DIR}")
+    print("\nOutput directory:")
+    print(OUTPUT_DIR)
 
 
 # ============================================================
-# 8. EXECUTION
+# 9. RUN SCRIPT
 # ============================================================
 
 if __name__ == "__main__":
