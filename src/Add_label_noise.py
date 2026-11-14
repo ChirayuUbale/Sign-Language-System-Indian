@@ -1,230 +1,605 @@
 
-import random
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-
 from pathlib import Path
-from PIL import Image
+import csv
 
-# ==========================================
-# 1. SETTINGS
-# ==========================================
+import cv2
+import numpy as np
+import mediapipe as mp
 
-DATA_FOLDER = Path("data")
-OUTPUT_FOLDER = Path("Label_Noise_Experiments")
 
-OUTPUT_FOLDER.mkdir(exist_ok=True)
+# ============================================================
+# CONFIGURATION
+# ============================================================
 
-NOISE_LEVELS = [0, 10, 20, 30, 40]
+ROOT = Path(__file__).resolve().parent.parent
 
-RANDOM_SEED = 42
+DATA_DIR = ROOT / "data"
+OUTPUT_DIR = ROOT / "Preprocessed_Data_Final"
 
-random.seed(RANDOM_SEED)
-np.random.seed(RANDOM_SEED)
+IMAGE_SIZE = 256
+HAND_PADDING = 0.60
 
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp"}
+# None = process all 2160 images
+MAX_IMAGES = None
 
-# ==========================================
-# 2. READ ALL IMAGES
-# ==========================================
+# False is recommended for SURF feature extraction.
+# True draws the 21 landmarks and connections on each hand.
+DRAW_SKELETON = True
 
-image_data = []
+# Preserve original hand details instead of aggressively
+# removing fingers using skin-colour segmentation.
+USE_SKIN_MASK = False
 
-for signer_folder in sorted(DATA_FOLDER.iterdir()):
+EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp"}
 
-    if not signer_folder.is_dir():
-        continue
+mp_hands = mp.solutions.hands
 
-    signer = signer_folder.name
 
-    for label_folder in sorted(signer_folder.iterdir()):
+# ============================================================
+# RESIZE IMAGE WITHOUT DISTORTION
+# ============================================================
 
-        if not label_folder.is_dir():
-            continue
+def resize_with_padding(image, size=IMAGE_SIZE):
 
-        label = label_folder.name
+    height, width = image.shape[:2]
 
-        for image_path in label_folder.iterdir():
+    scale = min(size / width, size / height)
 
-            if image_path.suffix.lower() in IMAGE_EXTENSIONS:
+    new_width = max(1, int(round(width * scale)))
+    new_height = max(1, int(round(height * scale)))
 
-                image_data.append({
-                    "image_path": str(image_path),
-                    "signer": signer,
-                    "original_label": label,
-                    "noisy_label": label,
-                    "is_noisy": False
-                })
-
-df = pd.DataFrame(image_data)
-
-if df.empty:
-    raise ValueError(
-        "No images found. Check your data folder location."
+    interpolation = (
+        cv2.INTER_AREA
+        if scale < 1
+        else cv2.INTER_LINEAR
     )
 
-print("Dataset loaded successfully!")
-print("\nTotal images:", len(df))
-
-print("\nImages per signer:")
-print(df.groupby("signer").size())
-
-print("\nImages per label:")
-print(df.groupby("original_label").size())
-
-# Check the three signers
-signers = sorted(df["signer"].unique())
-
-if len(signers) != 3:
-    raise ValueError(
-        f"Expected 3 signers, but found {len(signers)}: {signers}"
+    resized = cv2.resize(
+        image,
+        (new_width, new_height),
+        interpolation=interpolation
     )
 
-# ==========================================
-# 3. INTRODUCE LABEL NOISE
-# ==========================================
+    if image.ndim == 2:
+        canvas = np.zeros(
+            (size, size),
+            dtype=np.uint8
+        )
+    else:
+        canvas = np.zeros(
+            (size, size, image.shape[2]),
+            dtype=np.uint8
+        )
 
-all_labels = sorted(df["original_label"].unique())
+    offset_x = (size - new_width) // 2
+    offset_y = (size - new_height) // 2
 
-if len(all_labels) < 2:
-    raise ValueError("At least two labels are required.")
+    canvas[
+        offset_y:offset_y + new_height,
+        offset_x:offset_x + new_width
+    ] = resized
 
-for noise_level in NOISE_LEVELS:
+    return canvas, scale, offset_x, offset_y
 
-    noisy_df = df.copy()
 
-    # Only select images for label corruption
-    number_to_change = round(
-        len(noisy_df) * noise_level / 100
+# ============================================================
+# DETECT BOTH HANDS USING MEDIAPIPE
+# ============================================================
+
+def detect_hands(image, hands):
+
+    height, width = image.shape[:2]
+
+    rgb = cv2.cvtColor(
+        image,
+        cv2.COLOR_BGR2RGB
     )
 
-    # Randomly select images from all three signers
-    selected_indices = random.sample(
-        list(noisy_df.index),
-        number_to_change
+    rgb.flags.writeable = False
+
+    result = hands.process(rgb)
+
+    if not result.multi_hand_landmarks:
+        return None
+
+    all_hands_points = []
+
+    for hand_landmarks in result.multi_hand_landmarks:
+
+        points = []
+
+        for landmark in hand_landmarks.landmark:
+
+            x = landmark.x * width
+            y = landmark.y * height
+
+            points.append((x, y))
+
+        all_hands_points.append(points)
+
+    return all_hands_points
+
+
+# ============================================================
+# GENERATE SAFE CROP FOR BOTH HANDS
+# ============================================================
+
+def calculate_crop(image, all_hands_points):
+
+    height, width = image.shape[:2]
+
+    all_points = [
+        point
+        for hand_points in all_hands_points
+        for point in hand_points
+    ]
+
+    xs = [point[0] for point in all_points]
+    ys = [point[1] for point in all_points]
+
+    min_x = min(xs)
+    max_x = max(xs)
+
+    min_y = min(ys)
+    max_y = max(ys)
+
+    hand_width = max_x - min_x
+    hand_height = max_y - min_y
+
+    margin = HAND_PADDING * max(
+        hand_width,
+        hand_height
     )
 
-    for index in selected_indices:
+    x1 = max(0, int(np.floor(min_x - margin)))
+    y1 = max(0, int(np.floor(min_y - margin)))
 
-        correct_label = noisy_df.loc[
-            index, "original_label"
-        ]
+    x2 = min(width, int(np.ceil(max_x + margin)))
+    y2 = min(height, int(np.ceil(max_y + margin)))
 
-        # Select a different, incorrect label
-        possible_labels = [
-            label for label in all_labels
-            if label != correct_label
-        ]
+    if x2 <= x1 or y2 <= y1:
+        return None
 
-        wrong_label = random.choice(possible_labels)
+    return x1, y1, x2, y2
 
-        noisy_df.loc[index, "noisy_label"] = wrong_label
-        noisy_df.loc[index, "is_noisy"] = True
 
-    # Save experiment results
-    output_csv = (
-        OUTPUT_FOLDER / f"noisy_labels_{noise_level}.csv"
+# ============================================================
+# RESEARCH-BASED SKIN SEGMENTATION
+# OPTIONAL: NOT USED BY DEFAULT
+# ============================================================
+
+def create_skin_mask(image):
+
+    # Gaussian blurring
+    blurred = cv2.GaussianBlur(
+        image,
+        (3, 3),
+        0
     )
 
-    noisy_df.to_csv(output_csv, index=False)
-
-    print("\n------------------------------")
-    print(f"NOISE LEVEL: {noise_level}%")
-    print("------------------------------")
-    print("Total images:", len(noisy_df))
-    print("Incorrect labels:", noisy_df["is_noisy"].sum())
-    print("Saved:", output_csv)
-
-# ==========================================
-# 4. SHOW NOISY IMAGE EXAMPLES
-# ==========================================
-
-demo_df = pd.read_csv(
-    OUTPUT_FOLDER / "noisy_labels_20.csv"
-)
-
-noisy_examples = demo_df[
-    demo_df["is_noisy"] == True
-].sample(
-    n=min(12, len(demo_df[demo_df["is_noisy"] == True])),
-    random_state=RANDOM_SEED
-)
-
-fig, axes = plt.subplots(3, 4, figsize=(15, 11))
-
-axes = axes.flatten()
-
-for ax, (_, row) in zip(axes, noisy_examples.iterrows()):
-
-    image_path = Path(row["image_path"])
-
-    image = Image.open(image_path).convert("RGB")
-
-    ax.imshow(image)
-
-    ax.set_title(
-        f"Signer: {row['signer']}\n"
-        f"Original: {row['original_label']}\n"
-        f"Noisy: {row['noisy_label']}",
-        fontsize=10
+    # BGR to HSV
+    hsv = cv2.cvtColor(
+        blurred,
+        cv2.COLOR_BGR2HSV
     )
 
-    ax.axis("off")
-
-for ax in axes[len(noisy_examples):]:
-    ax.axis("off")
-
-plt.suptitle(
-    "Random Label Noise - 20% Experiment",
-    fontsize=16
-)
-
-plt.tight_layout()
-
-plt.savefig(
-    OUTPUT_FOLDER / "noisy_image_examples.png",
-    dpi=300,
-    bbox_inches="tight"
-)
-
-plt.show()
-
-# ==========================================
-# 5. NOISE DISTRIBUTION GRAPH
-# ==========================================
-
-noise_counts = []
-
-for noise_level in NOISE_LEVELS:
-
-    result = pd.read_csv(
-        OUTPUT_FOLDER / f"noisy_labels_{noise_level}.csv"
+    # BGR to YCrCb
+    ycrcb = cv2.cvtColor(
+        blurred,
+        cv2.COLOR_BGR2YCrCb
     )
 
-    noise_counts.append(result["is_noisy"].sum())
+    # HSV thresholding and binarization
+    hsv_mask = cv2.inRange(
+        hsv,
+        np.array([0, 20, 35], dtype=np.uint8),
+        np.array([25, 255, 255], dtype=np.uint8)
+    )
 
-plt.figure(figsize=(9, 5))
+    # YCrCb thresholding
+    ycrcb_mask = cv2.inRange(
+        ycrcb,
+        np.array([0, 125, 75], dtype=np.uint8),
+        np.array([255, 180, 140], dtype=np.uint8)
+    )
 
-plt.bar(
-    [f"{level}%" for level in NOISE_LEVELS],
-    noise_counts
-)
+    # Combine both masks
+    mask = cv2.bitwise_and(
+        hsv_mask,
+        ycrcb_mask
+    )
 
-plt.title("Number of Incorrect Labels at Each Noise Level")
-plt.xlabel("Noise Percentage")
-plt.ylabel("Number of Incorrect Labels")
+    # Morphological operations
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE,
+        (3, 3)
+    )
 
-plt.tight_layout()
+    mask = cv2.morphologyEx(
+        mask,
+        cv2.MORPH_OPEN,
+        kernel
+    )
 
-plt.savefig(
-    OUTPUT_FOLDER / "noise_distribution.png",
-    dpi=300
-)
+    mask = cv2.morphologyEx(
+        mask,
+        cv2.MORPH_CLOSE,
+        kernel
+    )
 
-plt.show()
+    # Preserve multiple contours, not just the largest
+    contours, _ = cv2.findContours(
+        mask,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE
+    )
 
-print("\n================================")
-print("LABEL NOISE EXPERIMENT COMPLETED")
-print("================================")
-print("Check the Label_Noise_Experiments folder.")
+    final_mask = np.zeros_like(mask)
+
+    minimum_area = 0.001 * mask.size
+
+    for contour in contours:
+
+        if cv2.contourArea(contour) >= minimum_area:
+
+            cv2.drawContours(
+                final_mask,
+                [contour],
+                -1,
+                255,
+                thickness=cv2.FILLED
+            )
+
+    return final_mask
+
+
+# ============================================================
+# DRAW LANDMARKS FOR BOTH HANDS
+# ============================================================
+
+def draw_hand_skeleton(
+    image,
+    all_hands_points,
+    x1,
+    y1,
+    scale,
+    offset_x,
+    offset_y
+):
+
+    for hand_points in all_hands_points:
+
+        transformed_points = []
+
+        for px, py in hand_points:
+
+            new_x = int(round(
+                (px - x1) * scale + offset_x
+            ))
+
+            new_y = int(round(
+                (py - y1) * scale + offset_y
+            ))
+
+            new_x = int(np.clip(
+                new_x, 0, IMAGE_SIZE - 1
+            ))
+
+            new_y = int(np.clip(
+                new_y, 0, IMAGE_SIZE - 1
+            ))
+
+            transformed_points.append(
+                (new_x, new_y)
+            )
+
+        # Draw connections
+        for start, end in mp_hands.HAND_CONNECTIONS:
+
+            cv2.line(
+                image,
+                transformed_points[start],
+                transformed_points[end],
+                255,
+                2,
+                cv2.LINE_AA
+            )
+
+        # Draw 21 landmark points
+        for point in transformed_points:
+
+            cv2.circle(
+                image,
+                point,
+                3,
+                255,
+                -1,
+                cv2.LINE_AA
+            )
+
+    return image
+
+
+# ============================================================
+# COMPLETE PREPROCESSING PIPELINE
+# ============================================================
+
+def preprocess_image(image, hands):
+
+    # 1. Detect up to two hands
+    all_hands_points = detect_hands(
+        image,
+        hands
+    )
+
+    if all_hands_points is None:
+        return None, "no_hand_detected", 0
+
+    detected_count = len(all_hands_points)
+
+    # For a two-handed gesture, detecting only one hand
+    # is insufficient. Use full image to avoid cropping
+    # out the undetected hand.
+    if detected_count == 1:
+
+        height, width = image.shape[:2]
+
+        x1, y1 = 0, 0
+        x2, y2 = width, height
+
+    else:
+
+        bbox = calculate_crop(
+            image,
+            all_hands_points
+        )
+
+        if bbox is None:
+            return None, "invalid_crop", detected_count
+
+        x1, y1, x2, y2 = bbox
+
+    # 2. Crop image
+    cropped = image[y1:y2, x1:x2]
+
+    if cropped.size == 0:
+        return None, "empty_crop", detected_count
+
+    # 3. Gaussian filtering
+    blurred = cv2.GaussianBlur(
+        cropped,
+        (3, 3),
+        0
+    )
+
+    # 4. Grayscale conversion
+    grayscale = cv2.cvtColor(
+        blurred,
+        cv2.COLOR_BGR2GRAY
+    )
+
+    # 5. Optional research skin segmentation
+    if USE_SKIN_MASK:
+
+        mask = create_skin_mask(cropped)
+
+        # Avoid applying an empty mask
+        if cv2.countNonZero(mask) > 0:
+
+            grayscale = cv2.bitwise_and(
+                grayscale,
+                grayscale,
+                mask=mask
+            )
+
+    # 6. Resize to 256 x 256
+    final, scale, offset_x, offset_y = (
+        resize_with_padding(
+            grayscale,
+            IMAGE_SIZE
+        )
+    )
+
+    # 7. Optional skeleton drawing
+    if DRAW_SKELETON:
+
+        final = draw_hand_skeleton(
+            final,
+            all_hands_points,
+            x1,
+            y1,
+            scale,
+            offset_x,
+            offset_y
+        )
+
+    # ONE FINAL IMAGE
+    return final, None, detected_count
+
+
+# ============================================================
+# PROCESS COMPLETE DATASET
+# ============================================================
+
+def main():
+
+    if not DATA_DIR.exists():
+
+        print("ERROR: data folder not found.")
+        print("Expected:", DATA_DIR)
+
+        return
+
+    image_paths = sorted(
+        path
+        for path in DATA_DIR.rglob("*")
+        if path.is_file()
+        and path.suffix.lower() in EXTENSIONS
+    )
+
+    total_original = len(image_paths)
+
+    if MAX_IMAGES is not None:
+        image_paths = image_paths[:MAX_IMAGES]
+
+    OUTPUT_DIR.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    print("\n========== DATASET PREPROCESSING ==========")
+    print("Total original images:", total_original)
+    print("Images selected:", len(image_paths))
+    print("Maximum hands:", 2)
+    print("Crop padding:", HAND_PADDING)
+    print("Skin segmentation:", USE_SKIN_MASK)
+    print("Draw skeleton:", DRAW_SKELETON)
+
+    success = 0
+    failed = 0
+
+    one_hand_count = 0
+    two_hand_count = 0
+
+    failures = []
+    detection_log = []
+
+    with mp_hands.Hands(
+        static_image_mode=True,
+        max_num_hands=2,
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5
+    ) as hands:
+
+        for index, path in enumerate(image_paths, 1):
+
+            relative = path.relative_to(DATA_DIR)
+
+            image = cv2.imread(str(path))
+
+            if image is None:
+
+                failed += 1
+
+                failures.append(
+                    (str(relative), "image_read_failed")
+                )
+
+                continue
+
+            processed, error, hand_count = (
+                preprocess_image(
+                    image,
+                    hands
+                )
+            )
+
+            if error is not None:
+
+                failed += 1
+
+                failures.append(
+                    (str(relative), error)
+                )
+
+                continue
+
+            if hand_count == 1:
+                one_hand_count += 1
+
+            elif hand_count == 2:
+                two_hand_count += 1
+
+            destination = (
+                OUTPUT_DIR
+                / relative.with_suffix(".png")
+            )
+
+            destination.parent.mkdir(
+                parents=True,
+                exist_ok=True
+            )
+
+            saved = cv2.imwrite(
+                str(destination),
+                processed
+            )
+
+            if saved:
+
+                success += 1
+
+                detection_log.append(
+                    (
+                        str(relative),
+                        hand_count,
+                        "review" if hand_count == 1 else "ok"
+                    )
+                )
+
+            else:
+
+                failed += 1
+
+                failures.append(
+                    (str(relative), "save_failed")
+                )
+
+            if index % 100 == 0:
+
+                print(
+                    f"Processed {index}/{len(image_paths)}"
+                )
+
+    # Save failure log
+    with open(
+        OUTPUT_DIR / "failures.csv",
+        "w",
+        newline="",
+        encoding="utf-8"
+    ) as file:
+
+        writer = csv.writer(file)
+
+        writer.writerow([
+            "image",
+            "reason"
+        ])
+
+        writer.writerows(failures)
+
+    # Save detection log
+    with open(
+        OUTPUT_DIR / "hand_detection_log.csv",
+        "w",
+        newline="",
+        encoding="utf-8"
+    ) as file:
+
+        writer = csv.writer(file)
+
+        writer.writerow([
+            "image",
+            "detected_hands",
+            "status"
+        ])
+
+        writer.writerows(detection_log)
+
+    print("\n========== FINAL RESULTS ==========")
+
+    print("Original images:", total_original)
+    print("Attempted:", len(image_paths))
+    print("Successfully saved:", success)
+    print("Failed:", failed)
+    print("One hand detected:", one_hand_count)
+    print("Two hands detected:", two_hand_count)
+
+    print("\nOutput directory:")
+    print(OUTPUT_DIR)
+
+    print("\nPreprocessing completed.")
+
+
+if __name__ == "__main__":
+    main()
