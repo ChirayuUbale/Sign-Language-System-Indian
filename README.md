@@ -39,3 +39,32 @@ Each notebook contains its sample visualizations. Image-only contact sheets are 
 ### Notes
 
 The HSV threshold is an exploratory color mask, not a hand annotation. It may include clothing or background pixels and miss parts of a hand under different lighting or camera conditions. The filters and contour operations change the mask but do not establish that the hand was segmented correctly. Use annotated hand masks to evaluate segmentation quality, and a held-out signer split to evaluate recognition performance.
+
+## CNN Feature Inputs
+
+`src/build_feature_inputs.py` runs SURF on the images in `Preprocessed_Data_Final/` and writes to `Feature_Inputs/`:
+
+- `surf_map/`: SURF keypoint heat map for each image
+- `skeleton/`: MediaPipe skeleton on a black background, drawn from `mediapipe_landmarks.csv`
+- `surf_keypoints/`: SURF keypoints and 64-value descriptors (`.npz`)
+- `feature_log.csv` and `preview.png`
+
+`src/preprocess_pipeline.py` is a copy of `src/Preprocesspipeline` from the PreprocessingPipeline branch, renamed so its functions can be imported.
+
+`src/features/cnn_inputs.py` stacks the preprocessed image, SURF map and skeleton into 100x100x3 arrays for the `Label_Noise_Experiments` splits.
+
+```bash
+python src/build_feature_inputs.py --limit 10   # test on 10 images
+python src/build_feature_inputs.py              # all images
+python src/features/cnn_inputs.py --export      # writes Feature_Inputs/stacked_100/<split>.npz
+```
+
+SURF is patented and is not included in the OpenCV pip wheels. Build OpenCV with it enabled (Python 3.12 or lower for MediaPipe 0.10.14):
+
+```bash
+pip uninstall -y opencv-python opencv-contrib-python
+CMAKE_ARGS="-DOPENCV_ENABLE_NONFREE=ON" ENABLE_CONTRIB=1 \
+  pip install --no-binary opencv-contrib-python opencv-contrib-python==4.11.0.86
+```
+
+Note: `data/` contains exact duplicate images (1,309 unique out of 2,160), so 375 of the 648 images in `Label_Noise_Experiments/Test_Clean` also appear in training.
