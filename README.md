@@ -6,6 +6,18 @@ Signer-independent Indian Sign Language (A–Z) recognition: SURF+BoVW+SVM vs. C
 
 The original images are stored in `data/`, organized by signer and sign class. The dataset contains 2,160 images across Areeb, Ayomide, and Chirayu (720 per signer).
 
+## Collecting images
+
+`src/collection.py` captures webcam images for A-Z and 0-9, saving clean color crops as `data/<signer>/<label>/<label>_001.png`. It resumes existing folders without overwriting images and skips signs that already meet the target of 20 images. Each sign starts with 15 seconds to prepare, followed by one photo every 2 seconds. Keep both hands inside the green rectangle; press **S** to capture immediately or **Q / Escape** to quit.
+
+```bash
+python src/collection.py                         # prompts for the signer name
+python src/collection.py --signer NewSigner       # collects all 36 signs
+python src/collection.py --signer Chirayu --labels A B --goal 25
+```
+
+The last command adds five new photos each for A and B when those folders already contain 20 images. Use `--camera 1` to select another webcam, or `--help` for timing options. The crop uses the original collector's proportions and preserves the camera's resolution without resizing or preprocessing.
+
 ## Preprocessing Experiments
 
 The notebooks in `Experiment/` show image preprocessing steps used to explore the Indian Sign Language dataset. Each notebook takes a deterministic sample of 30 images: 10 from each signer (Areeb, Ayomide, and Chirayu), using random seed 42. The notebooks display image results; they do not calculate coverage percentages or write measurement CSV files.

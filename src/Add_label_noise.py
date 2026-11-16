@@ -7,9 +7,6 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from PIL import Image
 
-# ==========================================
-# 1. SETTINGS
-# ==========================================
 
 DATA_FOLDER = Path("data")
 OUTPUT_FOLDER = Path("Label_Noise_Experiments")
@@ -25,9 +22,6 @@ np.random.seed(RANDOM_SEED)
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp"}
 
-# ==========================================
-# 2. READ ALL IMAGES
-# ==========================================
 
 image_data = []
 
@@ -73,7 +67,6 @@ print(df.groupby("signer").size())
 print("\nImages per label:")
 print(df.groupby("original_label").size())
 
-# Check the three signers
 signers = sorted(df["signer"].unique())
 
 if len(signers) != 3:
@@ -81,9 +74,6 @@ if len(signers) != 3:
         f"Expected 3 signers, but found {len(signers)}: {signers}"
     )
 
-# ==========================================
-# 3. INTRODUCE LABEL NOISE
-# ==========================================
 
 all_labels = sorted(df["original_label"].unique())
 
@@ -94,12 +84,10 @@ for noise_level in NOISE_LEVELS:
 
     noisy_df = df.copy()
 
-    # Only select images for label corruption
     number_to_change = round(
         len(noisy_df) * noise_level / 100
     )
 
-    # Randomly select images from all three signers
     selected_indices = random.sample(
         list(noisy_df.index),
         number_to_change
@@ -111,7 +99,6 @@ for noise_level in NOISE_LEVELS:
             index, "original_label"
         ]
 
-        # Select a different, incorrect label
         possible_labels = [
             label for label in all_labels
             if label != correct_label
@@ -122,7 +109,6 @@ for noise_level in NOISE_LEVELS:
         noisy_df.loc[index, "noisy_label"] = wrong_label
         noisy_df.loc[index, "is_noisy"] = True
 
-    # Save experiment results
     output_csv = (
         OUTPUT_FOLDER / f"noisy_labels_{noise_level}.csv"
     )
@@ -136,9 +122,6 @@ for noise_level in NOISE_LEVELS:
     print("Incorrect labels:", noisy_df["is_noisy"].sum())
     print("Saved:", output_csv)
 
-# ==========================================
-# 4. SHOW NOISY IMAGE EXAMPLES
-# ==========================================
 
 demo_df = pd.read_csv(
     OUTPUT_FOLDER / "noisy_labels_20.csv"
@@ -190,9 +173,6 @@ plt.savefig(
 
 plt.show()
 
-# ==========================================
-# 5. NOISE DISTRIBUTION GRAPH
-# ==========================================
 
 noise_counts = []
 

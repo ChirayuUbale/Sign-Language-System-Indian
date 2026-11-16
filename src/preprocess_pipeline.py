@@ -9,41 +9,30 @@ import numpy as np
 import mediapipe as mp
 
 
-# ============================================================
-# CONFIGURATION
-# ============================================================
 
 ROOT = Path(__file__).resolve().parent.parent
 
 DATA_DIR = ROOT / "data"
 OUTPUT_DIR = ROOT / "Preprocessed_Data_Final"
 
-# Final output dimensions
 IMAGE_SIZE = 256
 
-# None = process ALL dataset images
 MAX_IMAGES = None
 
-# Large safety margin around BOTH detected hands
 HAND_PADDING = 0.80
 
-# If fewer than 2 hands are detected, preserve full frame
 REQUIRE_TWO_HANDS_FOR_CROP = True
 
-# CLAHE settings for poor lighting / different skin tones
 CLAHE_CLIP_LIMIT = 2.0
 CLAHE_TILE_GRID = (8, 8)
 
-# Mild filtering
 GAUSSIAN_KERNEL = (3, 3)
 MEDIAN_KERNEL = 3
 
-# MediaPipe settings
 MAX_HANDS = 2
 MIN_DETECTION_CONFIDENCE = 0.35
 MODEL_COMPLEXITY = 1
 
-# Visible landmarks and skeleton
 DRAW_LANDMARKS = True
 DRAW_CONNECTIONS = True
 
@@ -56,9 +45,6 @@ EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp"}
 mp_hands = mp.solutions.hands
 
 
-# ============================================================
-# 1. RESIZE WITH PADDING
-# ============================================================
 
 def resize_with_padding(image, size=IMAGE_SIZE):
 
@@ -106,9 +92,6 @@ def resize_with_padding(image, size=IMAGE_SIZE):
     return canvas, scale, offset_x, offset_y
 
 
-# ============================================================
-# 2. MEDIAPIPE HAND DETECTION
-# ============================================================
 
 def detect_hands(image, hands):
 
@@ -145,9 +128,6 @@ def detect_hands(image, hands):
     return detected_hands
 
 
-# ============================================================
-# 3. LARGE SAFE CROP FOR BOTH HANDS
-# ============================================================
 
 def calculate_safe_crop(image, detected_hands):
 
@@ -178,11 +158,9 @@ def calculate_safe_crop(image, detected_hands):
     min_y = min(ys)
     max_y = max(ys)
 
-    # Hand region covering all detected landmarks
     region_width = max_x - min_x
     region_height = max_y - min_y
 
-    # Extra 80% margin based on larger dimension
     margin = HAND_PADDING * max(
         region_width,
         region_height
@@ -219,24 +197,15 @@ def calculate_safe_crop(image, detected_hands):
     return cropped, x1, y1, "cropped"
 
 
-# ============================================================
-# 4. MAIN PREPROCESSING PIPELINE
-# ============================================================
 
 def preprocess_main_image(image):
 
-    # --------------------------------------------------------
-    # RESEARCH TECHNIQUE 1: GRAYSCALE CONVERSION
-    # --------------------------------------------------------
 
     grayscale = cv2.cvtColor(
         image,
         cv2.COLOR_BGR2GRAY
     )
 
-    # --------------------------------------------------------
-    # ADDITIONAL TECHNIQUE: CLAHE
-    # --------------------------------------------------------
 
     clahe = cv2.createCLAHE(
         clipLimit=CLAHE_CLIP_LIMIT,
@@ -245,9 +214,6 @@ def preprocess_main_image(image):
 
     enhanced = clahe.apply(grayscale)
 
-    # --------------------------------------------------------
-    # RESEARCH TECHNIQUE 2: GAUSSIAN BLURRING
-    # --------------------------------------------------------
 
     gaussian = cv2.GaussianBlur(
         enhanced,
@@ -255,18 +221,12 @@ def preprocess_main_image(image):
         0
     )
 
-    # --------------------------------------------------------
-    # RESEARCH TECHNIQUE 3: MEDIAN FILTERING
-    # --------------------------------------------------------
 
     median = cv2.medianBlur(
         gaussian,
         MEDIAN_KERNEL
     )
 
-    # --------------------------------------------------------
-    # RESEARCH TECHNIQUE 4: IMAGE RESIZING
-    # --------------------------------------------------------
 
     final, scale, offset_x, offset_y = (
         resize_with_padding(
@@ -278,15 +238,9 @@ def preprocess_main_image(image):
     return final, scale, offset_x, offset_y
 
 
-# ============================================================
-# 5. OTHER 3 RESEARCH-PAPER TECHNIQUES
-# ============================================================
 
 def calculate_research_analysis(image):
 
-    # --------------------------------------------------------
-    # RESEARCH TECHNIQUE 5: BGR TO HSV CONVERSION
-    # --------------------------------------------------------
 
     hsv = cv2.cvtColor(
         image,
@@ -298,9 +252,6 @@ def calculate_research_analysis(image):
         cv2.COLOR_BGR2GRAY
     )
 
-    # --------------------------------------------------------
-    # RESEARCH TECHNIQUE 6: BINARIZATION
-    # --------------------------------------------------------
 
     threshold_value, binary = cv2.threshold(
         gray,
@@ -309,9 +260,6 @@ def calculate_research_analysis(image):
         cv2.THRESH_BINARY + cv2.THRESH_OTSU
     )
 
-    # --------------------------------------------------------
-    # RESEARCH TECHNIQUE 7: CANNY EDGE DETECTION
-    # --------------------------------------------------------
 
     edges = cv2.Canny(
         gray,
@@ -319,8 +267,6 @@ def calculate_research_analysis(image):
         150
     )
 
-    # Statistics for research.
-    # Do not use these masks to remove hands/fingers.
     return {
         "mean_hue": float(
             np.mean(hsv[:, :, 0])
@@ -337,9 +283,6 @@ def calculate_research_analysis(image):
     }
 
 
-# ============================================================
-# 6. DRAW LANDMARK POINTS AND SKELETON
-# ============================================================
 
 def draw_landmarks_on_image(
     image,
@@ -359,11 +302,9 @@ def draw_landmarks_on_image(
 
         for point in hand_points:
 
-            # Original coordinates -> cropped coordinates
             local_x = point["x"] - crop_x
             local_y = point["y"] - crop_y
 
-            # Cropped coordinates -> final resized coordinates
             final_x = int(round(
                 local_x * scale + offset_x
             ))
@@ -388,7 +329,6 @@ def draw_landmarks_on_image(
                 (final_x, final_y)
             )
 
-        # Skeleton connections
         if DRAW_CONNECTIONS:
 
             for start, end in mp_hands.HAND_CONNECTIONS:
@@ -402,7 +342,6 @@ def draw_landmarks_on_image(
                     cv2.LINE_AA
                 )
 
-        # 21 landmark points
         if DRAW_LANDMARKS:
 
             for point in transformed_points:
@@ -419,9 +358,6 @@ def draw_landmarks_on_image(
     return output
 
 
-# ============================================================
-# 7. EXTRACT SKELETON GEOMETRY
-# ============================================================
 
 def extract_skeleton_connections(detected_hands):
 
@@ -448,9 +384,6 @@ def extract_skeleton_connections(detected_hands):
     return skeletons
 
 
-# ============================================================
-# 8. CSV HELPER
-# ============================================================
 
 def save_csv(filename, header, rows):
 
@@ -471,9 +404,6 @@ def save_csv(filename, header, rows):
         writer.writerows(rows)
 
 
-# ============================================================
-# 9. PROCESS COMPLETE DATASET
-# ============================================================
 
 def main():
 
@@ -548,9 +478,6 @@ def main():
 
             try:
 
-                # ------------------------------------------------
-                # STEP 1: DETECT HANDS ON ORIGINAL COLOUR IMAGE
-                # ------------------------------------------------
 
                 detected_hands = detect_hands(
                     image,
@@ -559,9 +486,6 @@ def main():
 
                 hand_count = len(detected_hands)
 
-                # ------------------------------------------------
-                # STEP 2: SAFE LARGE CROP
-                # ------------------------------------------------
 
                 cropped, crop_x, crop_y, crop_status = (
                     calculate_safe_crop(
@@ -570,17 +494,11 @@ def main():
                     )
                 )
 
-                # ------------------------------------------------
-                # STEP 3: MAIN IMAGE PREPROCESSING
-                # ------------------------------------------------
 
                 final, scale, ox, oy = (
                     preprocess_main_image(cropped)
                 )
 
-                # ------------------------------------------------
-                # STEP 4: HSV, BINARIZATION, CANNY ANALYSIS
-                # ------------------------------------------------
 
                 if RUN_RESEARCH_ANALYSIS:
                     analysis = calculate_research_analysis(
@@ -594,9 +512,6 @@ def main():
                         "edge_pixel_ratio": None
                     }
 
-                # ------------------------------------------------
-                # STEP 5: DRAW MEDIAPIPE LANDMARKS
-                # ------------------------------------------------
 
                 final = draw_landmarks_on_image(
                     final,
@@ -608,17 +523,11 @@ def main():
                     oy
                 )
 
-                # ------------------------------------------------
-                # STEP 6: EXTRACT SKELETON CONNECTION DATA
-                # ------------------------------------------------
 
                 skeleton = extract_skeleton_connections(
                     detected_hands
                 )
 
-                # ------------------------------------------------
-                # STEP 7: SAVE ONE FINAL IMAGE
-                # ------------------------------------------------
 
                 destination = (
                     OUTPUT_DIR
@@ -694,9 +603,6 @@ def main():
                     f"Processed {index}/{len(image_paths)}"
                 )
 
-    # ========================================================
-    # SAVE RESEARCH LOGS
-    # ========================================================
 
     save_csv(
         "failures.csv",
@@ -738,9 +644,6 @@ def main():
         landmark_log
     )
 
-    # ========================================================
-    # RESULTS
-    # ========================================================
 
     print("\n========== FINAL RESULTS ==========")
     print("Original images:", total_original)
