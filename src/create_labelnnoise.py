@@ -12,9 +12,6 @@ from PIL import Image
 from sklearn.model_selection import train_test_split
 
 
-# ============================================================
-# 1. SETTINGS
-# ============================================================
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -35,9 +32,6 @@ np.random.seed(RANDOM_SEED)
 OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
 
 
-# ============================================================
-# 2. READ ORIGINAL PREPROCESSED IMAGES
-# ============================================================
 
 records = []
 
@@ -102,11 +96,7 @@ if len(labels) != 36:
     )
 
 
-# ============================================================
-# 3. TRAINING / TESTING SPLIT
-# ============================================================
 
-# Stratification preserves signer-class representation.
 df["stratify_key"] = (
     df["signer"] + "_" + df["original_label"]
 )
@@ -131,9 +121,6 @@ print("Training:", len(train_df))
 print("Testing:", len(test_df))
 
 
-# ============================================================
-# 4. COPY CLEAN TESTING IMAGES
-# ============================================================
 
 TEST_FOLDER = OUTPUT_FOLDER / "Test_Clean"
 
@@ -183,9 +170,6 @@ pd.DataFrame(test_records).to_csv(
 print("Clean test images copied:", len(test_records))
 
 
-# ============================================================
-# 5. GENERATE REPRODUCIBLE LABEL NOISE
-# ============================================================
 
 rng = random.Random(RANDOM_SEED)
 
@@ -212,9 +196,6 @@ for index in shuffled_indices:
     )
 
 
-# ============================================================
-# 6. GENERATE IMAGE DATASETS
-# ============================================================
 
 summary = []
 all_experiment_records = {}
@@ -229,7 +210,6 @@ for noise_level in NOISE_LEVELS:
         OUTPUT_FOLDER / f"Noise_{noise_level}" / "train"
     )
 
-    # Remove previous generated images for this experiment
     if experiment_folder.exists():
         shutil.rmtree(experiment_folder)
 
@@ -256,8 +236,6 @@ for noise_level in NOISE_LEVELS:
         else:
             assigned_label = original_label
 
-        # Store image in its ASSIGNED label folder.
-        # A gesture A incorrectly labelled F goes into F/.
         destination_dir = (
             experiment_folder / assigned_label
         )
@@ -322,9 +300,6 @@ for noise_level in NOISE_LEVELS:
     print("Incorrect labels:", incorrect_count)
 
 
-# ============================================================
-# 7. SAVE SUMMARY
-# ============================================================
 
 summary_df = pd.DataFrame(summary)
 
@@ -337,9 +312,6 @@ print("\n========== EXPERIMENT SUMMARY ==========")
 print(summary_df.to_string(index=False))
 
 
-# ============================================================
-# 8. GRAPH: TRAINING / TESTING DISTRIBUTION
-# ============================================================
 
 fig, ax = plt.subplots(figsize=(8, 5))
 
@@ -366,9 +338,6 @@ plt.savefig(
 plt.close(fig)
 
 
-# ============================================================
-# 9. GRAPH: CORRECT VS INCORRECT LABELS
-# ============================================================
 
 x = np.arange(len(NOISE_LEVELS))
 width = 0.35
@@ -422,9 +391,6 @@ plt.savefig(
 plt.close(fig)
 
 
-# ============================================================
-# 10. VISUALIZE 12 INCORRECTLY LABELLED IMAGES
-# ============================================================
 
 demo_df = all_experiment_records[20]
 
@@ -489,9 +455,6 @@ if sample_count > 0:
     plt.close(fig)
 
 
-# ============================================================
-# 11. FINAL VERIFICATION
-# ============================================================
 
 print("\n========== FINAL VERIFICATION ==========")
 
